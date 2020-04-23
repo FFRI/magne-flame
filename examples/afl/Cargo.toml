@@ -1,0 +1,28 @@
+[package]
+name = "afl"
+version = "0.1.0"
+authors = ["Daiki Sueyoshi"]
+workspace = "../../"
+edition = "2018"
+
+[dependencies]
+magne-flame = { path = "../../" }
+actix = "0.9.0"
+rand = "0.7"
+log = "0.4"
+env_logger = "0.7"
+
+[dependencies.winapi]
+version = "0.3"
+features = ["winuser",
+"winbase",
+"ioapiset",
+"processthreadsapi",
+"errhandlingapi",
+"synchapi",
+"handleapi",
+"namedpipeapi",
+"fileapi",
+"memoryapi",
+"winerror",
+"jobapi2"]

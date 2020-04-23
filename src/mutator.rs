@@ -1,0 +1,899 @@
+use crate::prelude::*;
+use num_traits::{WrappingAdd, WrappingSub};
+
+/// Mutates a `Vec<u8>` fuzz input.
+pub trait Mutator: Unpin + 'static {
+    /// Mutates the fuzz input.
+    fn mutate(&mut self, fuzz: &mut Vec<u8>) -> FuzzerResult<()>;
+    /// Undoes the fuzz input.
+    fn undo(&mut self, _fuzz: &mut Vec<u8>) -> FuzzerResult<()> {
+        unimplemented!("undo is not implemented.");
+    }
+}
+
+/// Receives a fuzz input and decides a mutation strategy, then mutates the fuzz input.
+pub trait MutationStrategy<T: Supervisor>: Unpin + 'static {
+    /// Decides a mutation strategy and mutates the fuzz input.
+    fn mutate(&mut self, seed: &mut T::Fuzz, ctx: &mut T::FuzzerContext) -> FuzzerResult<()>;
+    /// Undoes the fuzz input.
+    fn undo(&mut self, _seed: &mut T::Fuzz, _ctx: &mut T::FuzzerContext) -> FuzzerResult<()> {
+        unimplemented!("undo is not implemented.");
+    }
+}
+
+/// Uses 1 mutator.
+pub struct SimpleMutationStrategy<T: Mutator> { pub mutator: T }
+
+impl<T: Mutator> SimpleMutationStrategy<T> {
+    pub fn new(mutator: T) -> Self {
+        Self { mutator }
+    }
+}
+
+impl<T: Mutator, S: Supervisor> MutationStrategy<S> for SimpleMutationStrategy<T> {
+    fn mutate(&mut self, seed: &mut S::Fuzz, _ctx: &mut S::FuzzerContext) -> FuzzerResult<()> {
+        if let Err(_) = self.mutator.mutate(seed.get_mut_fuzz()) {
+            warn!("mutation error");
+        }
+        Ok(())
+    }
+}
+
+/// Does nothing (for debugging).
+pub struct TransparentMutator;
+
+impl Mutator for TransparentMutator {
+    /// Does nothing.
+    fn mutate(&mut self, _seed: &mut Vec<u8>) -> FuzzerResult<()> { Ok(()) }
+    /// Does nothing.
+    fn undo(&mut self, _seed: &mut Vec<u8>) -> FuzzerResult<()> { Ok(()) }
+}
+
+/// Flips a bit.
+///
+/// # Example
+/// ```rust
+/// use magne_flame::prelude::*;
+///
+/// fn main() {
+///     let mut v=vec![0xFF,0x00]; // 11111111 00000000
+///     BitFlip::mutate(&mut v, 1).unwrap();
+///     assert_eq!(v,[0xBF,0x00]); // 10111111 00000000
+/// }
+/// ```
+#[derive(Default)]
+pub struct BitFlip {
+    /// Bit position to flip.
+    pub pos: usize,
+}
+
+impl BitFlip {
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize) -> FuzzerResult<()> {
+        if pos >= seed.len() * 8 {
+            return Err(FuzzerError("Outbound of Vec".to_string()));
+        }
+        let x = pos >> 3;
+        let n = 128 >> (pos & 7);
+        seed[x] ^= n as u8;
+        Ok(())
+    }
+}
+
+impl Mutator for BitFlip {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos)
+    }
+
+    fn undo(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        self.mutate(seed)
+    }
+}
+
+/// Flips a random bit.
+#[derive(Default)]
+pub struct RandomBitFlip;
+
+impl Mutator for RandomBitFlip {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        let mut num = util::gen_random(0, seed.len() * 8);
+        num += 1;
+        for _ in 0..num {
+            let pos = util::gen_random(0, seed.len() * 8);
+            BitFlip::mutate(seed, pos).unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// Replaces a byte with printable character.
+#[derive(Default)]
+pub struct Printable {
+    pub replace_byte: ReplaceByte,
+    /// Byte position to replace.
+    pub pos: usize,
+    /// Character position.
+    pub cpos: usize,
+}
+
+impl Printable {
+    const V: &'static str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()=~|`{+*}<>?_ ,.^-[]@:;\\/";
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize, cpos: usize) -> FuzzerResult<()> {
+        let x = match Self::V.chars().nth(cpos) {
+            Some(x) => { x as u8 }
+            None => { return Err(FuzzerError("Outbound Printable character table".to_string())); }
+        };
+        ReplaceByte::mutate(seed, pos, x)
+    }
+    pub fn v_len() -> usize { Self::V.len() }
+}
+
+impl Mutator for Printable {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos, self.cpos)
+    }
+}
+
+/// Replaces a byte.
+#[derive(Default)]
+pub struct ReplaceByte {
+    /// Byte position to replace.
+    pub pos: usize,
+    /// Replaced value.
+    pub b: u8,
+}
+
+impl ReplaceByte {
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize, b: u8) -> FuzzerResult<()> {
+        let pos = pos;
+        if pos >= seed.len() {
+            return Err(FuzzerError("Outbound ReplaceByte".to_string()));
+        }
+        seed[pos] = b;
+        Ok(())
+    }
+}
+
+impl Mutator for ReplaceByte {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos, self.b)
+    }
+}
+
+/// Flips a byte.
+///
+/// # Example
+/// ```rust
+/// use magne_flame::prelude::*;
+///
+/// fn main() {
+///    let mut v = vec![0x68, 0x52]; // 01101000 01010010
+///    ByteFlip::mutate(&mut v, 1).unwrap();
+///    assert_eq!(v,[0x68,0xAD]); // 01101000 10101101
+///}
+/// ```
+#[derive(Default)]
+pub struct ByteFlip {
+    /// Byte position to flip.
+    pub pos: usize,
+}
+
+impl ByteFlip {
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize) -> FuzzerResult<()> {
+        if pos >= seed.len() {
+            return Err(FuzzerError("Outbound ByteFlip".to_string()));
+        }
+        seed[pos] ^= 0xFF as u8;
+        Ok(())
+    }
+}
+
+impl Mutator for ByteFlip {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos)
+    }
+
+    fn undo(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        self.mutate(seed)
+    }
+}
+
+/// Increments a byte.
+///
+/// # Example
+/// ```rust
+/// use magne_flame::prelude::*;
+///
+/// fn main() {
+///    let mut v = vec![0x68, 0x52];
+///    ArithmeticInc::mutate(&mut v, 1).unwrap();
+///    assert_eq!(v,[0x68,0x53]);
+///}
+/// ```
+#[derive(Default)]
+pub struct ArithmeticInc {
+    /// Byte position to increment.
+    pos: usize
+}
+
+impl ArithmeticInc {
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize) -> FuzzerResult<()> {
+        if pos >= seed.len() {
+            return Err(FuzzerError("Outbound ByteFlip".to_string()));
+        }
+        seed[pos] = seed[pos].wrapping_add(1);
+        Ok(())
+    }
+}
+
+impl Mutator for ArithmeticInc {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos)
+    }
+}
+
+/// Decrements a byte.
+///
+/// # Example
+/// ```rust
+/// use magne_flame::prelude::*;
+///
+/// fn main() {
+///    let mut v = vec![0x68, 0x52];
+///    ArithmeticDec::mutate(&mut v, 1).unwrap();
+///    assert_eq!(v,[0x68,0x51]);
+///}
+/// ```
+#[derive(Default)]
+pub struct ArithmeticDec {
+    /// Byte position to decrement.
+    pos: usize
+}
+
+impl ArithmeticDec {
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize) -> FuzzerResult<()> {
+        if pos >= seed.len() {
+            return Err(FuzzerError("Outbound ByteFlip".to_string()));
+        }
+        seed[pos] = seed[pos].wrapping_sub(1);
+        Ok(())
+    }
+}
+
+impl Mutator for ArithmeticDec {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos)
+    }
+}
+
+/// Arithmetic addition.
+///
+/// The size of the value is specified by the type of it.
+/// The value is treated as little-endian.
+/// This method allows overflows.
+///
+/// # Example
+///
+/// ```rust
+/// use magne_flame::prelude::*;
+///
+/// fn main() {
+///    let mut v = vec![0x12, 0x34, 0x56, 0x78];
+///    ArithmeticAdd::mutate(&mut v, 1,0x4649 as u16).unwrap();
+///    assert_eq!(v,[0x12, 0x7D, 0x9C, 0x78]); // 0x5634 + 0x4649 = 0x9C7D
+///}
+/// ```
+#[derive(Default)]
+pub struct ArithmeticAdd {
+    /// Bytes position to add.
+    pos: usize,
+    /// Addend.
+    val: u32,
+}
+
+impl ArithmeticAdd {
+    pub fn mutate<T: WrappingAdd<Output=T> + Copy>(seed: &mut Vec<u8>, pos: usize, val: T) -> FuzzerResult<()> {
+        if pos + std::mem::size_of::<T>() - 1 >= seed.len() {
+            return Err(FuzzerError("Outbound ByteFlip".to_string()));
+        }
+        let x = &mut seed[pos] as *mut u8 as *mut T;
+        unsafe {
+            let k = *x;
+            *x = k.wrapping_add(&val);
+        }
+        Ok(())
+    }
+}
+
+impl Mutator for ArithmeticAdd {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos, self.val)
+    }
+}
+
+/// Arithmetic subtraction.
+///
+/// The size of the value is specified by the type of it.
+/// The value is treated as little-endian.
+/// This method allows underflows.
+///
+/// # Example
+///
+/// ```rust
+/// use magne_flame::prelude::*;
+///
+/// fn main() {
+///    let mut v = vec![0x12, 0x34, 0x56, 0x78];
+///    ArithmeticSub::mutate(&mut v, 1,0x4649 as u16).unwrap();
+///    assert_eq!(v, [0x12, 0xEB, 0x0F, 0x78]); // 0x5634 - 0x4649 = 0x0FEB
+///}
+/// ```
+#[derive(Default)]
+pub struct ArithmeticSub {
+    /// Bytes position to add.
+    pos: usize,
+    /// Subtrahend.
+    val: u32,
+}
+
+impl ArithmeticSub {
+    pub fn mutate<T: WrappingSub<Output=T> + Copy>(seed: &mut Vec<u8>, pos: usize, val: T) -> FuzzerResult<()> {
+        if pos + std::mem::size_of::<T>() - 1 >= seed.len() {
+            return Err(FuzzerError("Outbound ByteFlip".to_string()));
+        }
+        let x = &mut seed[pos] as *mut u8 as *mut T;
+        unsafe {
+            let k = *x;
+            *x = k.wrapping_sub(&val);
+        }
+        Ok(())
+    }
+}
+
+impl Mutator for ArithmeticSub {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos, self.val)
+    }
+}
+
+/// Replaces a byte with v[cpos].
+pub struct Interesting {
+    /// Byte position to replace.
+    pos: usize,
+    /// Replaces with `v[cpos]`.
+    cpos: usize,
+    /// Interesting values.
+    v: Vec<u8>,
+}
+
+impl Interesting {
+    pub fn new(v: Vec<u8>) -> Self { Self { pos: 0, cpos: 0, v } }
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize, cpos: usize, v: &[u8]) -> FuzzerResult<()> {
+        if cpos >= v.len() { return Err(FuzzerError("Outbound Interesting".to_string())); }
+        ReplaceByte::mutate(seed, pos, v[cpos])
+    }
+}
+
+impl Mutator for Interesting {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos, self.cpos, &self.v)
+    }
+}
+
+/// Swaps a seed[pos1] and another seed[pos2].
+/// # Example
+///
+/// ```rust
+/// use magne_flame::prelude::*;
+///
+/// fn main() {
+///    let mut v = vec![0x12, 0x34, 0x56, 0x78];
+///    SwapByte::mutate(&mut v, 1, 2).unwrap();
+///    assert_eq!(v,[0x12,0x56,0x34,0x78]);
+///}
+/// ```
+#[derive(Default)]
+pub struct SwapByte {
+    pub pos1: usize,
+    pub pos2: usize,
+}
+
+impl SwapByte {
+    pub fn mutate(seed: &mut Vec<u8>, pos1: usize, pos2: usize) -> FuzzerResult<()> {
+        if pos1 >= seed.len() || pos2 >= seed.len() { return Err(FuzzerError("Outbound SwapByte".to_string())); }
+        let tmp = seed[pos1];
+        seed[pos1] = seed[pos2];
+        seed[pos2] = tmp;
+        Ok(())
+    }
+}
+
+impl Mutator for SwapByte {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos1, self.pos2)
+    }
+}
+
+/// Splices slices to seed.
+#[derive(Default)]
+pub struct Splice {
+    /// Position to insert slice.
+    pos: usize,
+    /// slice to insert.
+    slice: Vec<u8>,
+}
+
+impl Mutator for Splice {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, self.pos, &self.slice)
+    }
+}
+
+impl Splice {
+    pub fn mutate(seed: &mut Vec<u8>, pos: usize, slice: &Vec<u8>) -> FuzzerResult<()> {
+        seed.splice(pos..pos, slice.iter().cloned());
+        Ok(())
+    }
+}
+
+/// [HonggFuzz](https://github.com/google/honggfuzz)-like Mutation.
+pub struct HonggFuzzMutator {
+    iterations: usize,
+    pub dict: Vec<Vec<u8>>,
+    pub printable: bool,
+}
+
+impl HonggFuzzMutator {
+    pub fn new(iterations: usize) -> Self {
+        Self { iterations, dict: vec![], printable: false }
+    }
+
+    fn turn_to_printable(buf: &mut [u8]) {
+        for e in buf { *e = *e % 95 + 32; }
+    }
+
+    fn mangle_overwrite(dst: &mut Vec<u8>, src: &[u8], off: usize, mut sz: usize) {
+        let max_to_copy = dst.len() - off;
+        if sz > max_to_copy { sz = max_to_copy; }
+        for i in 0..sz { dst[off + i] = src[i]; }
+    }
+
+    fn mangle_bit(seed: &mut Vec<u8>, printable: bool) {
+        let off = util::gen_random(0, seed.len() * 8);
+        BitFlip::mutate(seed, util::gen_random(0, seed.len() * 8)).unwrap();
+        if printable { Self::turn_to_printable(&mut seed[off / 8..off / 8 + 1]); }
+    }
+
+    fn mangle_bytes(seed: &mut Vec<u8>, printable: bool) {
+        let off = util::gen_random(0, seed.len());
+        let to_copy = std::cmp::min(off + util::gen_random(1, 8 + 1), seed.len());
+        if printable {
+            for e in &mut seed[off..to_copy] { *e = util::gen_random(32, 126 + 1) as u8; }
+        } else {
+            for e in &mut seed[off..to_copy] { *e = util::gen_random(0, 256) as u8; }
+        }
+    }
+
+    fn mangle_magic(seed: &mut Vec<u8>, printable: bool) {
+        struct Magic { bytes: &'static [u8; 8], size: usize }
+        ;
+        macro_rules! m { ($x:expr,$y:expr)=>(Magic{bytes:$x,size:$y}); }
+        static MANGLE_MAGIC_VALUES: [Magic; 221] = [
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x06,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x09,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x0A,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x0B,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x0C,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x0D,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x0E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x0F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x20,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x7E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x7F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0x81,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0xFE,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            m!( &[ 0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 1 ),
+            /* 2B - NE */
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x80,0x80,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            /* 2B - BE */
+            m!( &[ 0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x06,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x07,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x08,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x09,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x0A,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x0B,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x0C,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x0D,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x0E,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x0F,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x20,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x7E,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x7F,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x80,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x81,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0xC0,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0xFE,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x7E,0xFF,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x7F,0xFF,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x80,0x01,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xFF,0xFE,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            /* 2&B - LE */
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x06,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x09,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x0A,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x0B,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x0C,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x0D,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x0E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x0F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x20,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x7E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x7F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x81,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xFE,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xFF,0x7E,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xFF,0x7F,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x00,0x80,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0x01,0x80,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            m!( &[ 0xFE,0xFF,0x00,0x00,0x00,0x00,0x00,0x00 ], 2 ),
+            /* 4B - NE */
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x80,0x80,0x80,0x80,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00 ], 4 ),
+            /* 4B - BE */
+            m!(&[ 0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,], 4),
+            m!( &[ 0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x08,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x09,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x0A,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x0B,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x0C,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x0D,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x0E,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x0F,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x7F,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x81,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0xC0,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0xFE,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0xFF,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x7E,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x7F,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x80,0x00,0x00,0x01,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xFF,0xFF,0xFF,0xFE,0x00,0x00,0x00,0x00 ], 4 ),
+            /* 4B - LE */
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x06,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x09,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x0A,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x0B,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x0C,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x0D,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x0E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x0F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x20,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x7E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x7F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x81,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xFE,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xFF,0xFF,0xFF,0x7E,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xFF,0xFF,0xFF,0x7F,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0x01,0x00,0x00,0x80,0x00,0x00,0x00,0x00 ], 4 ),
+            m!( &[ 0xFE,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00 ], 4 ),
+            /* 8B - NE */
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01 ], 8 ),
+            m!( &[ 0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80 ], 8 ),
+            m!( &[ 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF ], 8 ),
+            /* 8B - BE */
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x05 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x06 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x08 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x09 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0A ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0B ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0C ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0D ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0E ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0F ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x10 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x20 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x7E ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x7F ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x81 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xC0 ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFE ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF ], 8 ),
+            m!( &[ 0x7E,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF ], 8 ),
+            m!( &[ 0x7F,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF ], 8 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x01 ], 8 ),
+            m!( &[ 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE ], 8 ),
+            /* 8B - LE */
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x06,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x09,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x0A,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x0B,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x0C,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x0D,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x0E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x0F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x20,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x7E,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x7F,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0x81,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0xFE,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00 ], 8 ),
+            m!( &[ 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x7E ], 8 ),
+            m!( &[ 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x7F ], 8 ),
+            m!( &[ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80 ], 8 ),
+            m!( &[ 0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x80 ], 8 ),
+            m!( &[ 0xFE,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF ], 8 ),
+        ];
+        let off = util::gen_random(0, seed.len());
+        let choice = util::gen_random(0, MANGLE_MAGIC_VALUES.len());
+        Self::mangle_overwrite(seed, MANGLE_MAGIC_VALUES[choice].bytes, off, MANGLE_MAGIC_VALUES[choice].size);
+        if printable { Self::turn_to_printable(&mut seed[off..off + MANGLE_MAGIC_VALUES[choice].size]); }
+    }
+    fn mangle_dictionary(seed: &mut Vec<u8>, dict: &Vec<Vec<u8>>, printable: bool) {
+        if dict.len() == 0 {
+            Self::mangle_bit(seed, printable);
+            return;
+        }
+        let choice = util::gen_random(0, dict.len());
+        let off = util::gen_random(0, seed.len());
+        Self::mangle_overwrite(seed, &dict[choice].as_slice(), off, dict[choice].len());
+    }
+
+    fn mangle_dictionary_insert(seed: &mut Vec<u8>, dict: &Vec<Vec<u8>>, printable: bool) {
+        if dict.len() == 0 {
+            Self::mangle_bit(seed, printable);
+            return;
+        }
+        let choice = util::gen_random(0, dict.len());
+        let off = util::gen_random(0, seed.len());
+        Splice::mutate(seed, off, &dict[choice]).unwrap();
+    }
+
+    fn mangle_add_sub(seed: &mut Vec<u8>, printable: bool) {
+        let off = util::gen_random(0, seed.len());
+        let mut var_len = 1 << util::gen_random(0, 3) as usize;
+        if seed.len() - off < var_len { var_len = 1; }
+        Self::mangle_add_sub_with_range(seed, off, var_len);
+        if printable { Self::turn_to_printable(&mut seed[off..off + var_len]); }
+    }
+
+    fn mangle_add_sub_with_range(seed: &mut Vec<u8>, off: usize, var_len: usize) {
+        let delta = util::gen_random(0, 8192 - 1) - 4096;
+        let is_big_endian = util::gen_bool(0.5);
+        match var_len {
+            1 => {
+                if delta >= 0 {
+                    ArithmeticAdd::mutate(seed, off, delta as u8).unwrap();
+                } else {
+                    ArithmeticSub::mutate(seed, off, -delta as u8).unwrap();
+                }
+            }
+            2 => {
+                if is_big_endian {
+                    SwapByte::mutate(seed, off, off + 1).unwrap();
+                }
+                if delta >= 0 {
+                    ArithmeticAdd::mutate(seed, off, delta as u16).unwrap();
+                } else {
+                    ArithmeticSub::mutate(seed, off, -delta as u16).unwrap();
+                }
+                if is_big_endian {
+                    SwapByte::mutate(seed, off, off + 1).unwrap();
+                }
+            }
+            4 => {
+                if is_big_endian {
+                    SwapByte::mutate(seed, off, off + 3).unwrap();
+                    SwapByte::mutate(seed, off + 1, off + 2).unwrap();
+                }
+                if delta >= 0 {
+                    ArithmeticAdd::mutate(seed, off, delta as u32).unwrap();
+                } else {
+                    ArithmeticSub::mutate(seed, off, -delta as u32).unwrap();
+                }
+                if is_big_endian {
+                    SwapByte::mutate(seed, off, off + 3).unwrap();
+                    SwapByte::mutate(seed, off + 1, off + 2).unwrap();
+                }
+            }
+            8 => {
+                if is_big_endian {
+                    SwapByte::mutate(seed, off, off + 7).unwrap();
+                    SwapByte::mutate(seed, off + 1, off + 6).unwrap();
+                    SwapByte::mutate(seed, off + 2, off + 5).unwrap();
+                    SwapByte::mutate(seed, off + 3, off + 4).unwrap();
+                }
+                if delta >= 0 {
+                    ArithmeticAdd::mutate(seed, off, delta as u64).unwrap();
+                } else {
+                    ArithmeticSub::mutate(seed, off, -delta as u64).unwrap();
+                }
+                if is_big_endian {
+                    SwapByte::mutate(seed, off, off + 7).unwrap();
+                    SwapByte::mutate(seed, off + 1, off + 6).unwrap();
+                    SwapByte::mutate(seed, off + 2, off + 5).unwrap();
+                    SwapByte::mutate(seed, off + 3, off + 4).unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mutate(seed: &mut Vec<u8>, dict: &Vec<Vec<u8>>, iterations: usize, printable: bool) -> FuzzerResult<()> {
+        for i in 0..iterations {
+            trace!("HonggFuzz Iteration: {}", i);
+            match util::gen_random(0, 16) {
+                0 => {
+                    Self::mangle_bit(seed, printable);
+                }
+                1 => {
+                    Self::mangle_bytes(seed, printable);
+                }
+                2 => {
+                    Self::mangle_magic(seed, printable);
+                }
+                3 => {
+                    // mangle_inc_byte
+                    ArithmeticAdd::mutate(seed, util::gen_random(0, seed.len()), 1 as u8).unwrap();
+                }
+                4 => {
+                    // mangle_dec_byte
+                    ArithmeticSub::mutate(seed, util::gen_random(0, seed.len()), 1 as u8).unwrap();
+                }
+                5 => {
+                    // mangle_neg_byte
+                    let pos = util::gen_random(0, seed.len());
+                    seed[pos] = !seed[pos];
+                }
+                6 => {
+                    // arithmetic_add_sub
+                    Self::mangle_add_sub(seed, printable);
+                }
+                7 => {
+                    Self::mangle_dictionary(seed, dict, printable);
+                }
+                8 => {
+                    Self::mangle_dictionary_insert(seed, dict, printable);
+                }
+                9 => {
+                    // memmove
+                    let copy_len = util::gen_random(0, seed.len() - 1) + 1;
+                    util::mem_move(seed, util::gen_random(0, seed.len() - copy_len), util::gen_random(0, seed.len() - copy_len), copy_len).unwrap();
+                }
+                10 => {
+                    // memset
+                    let c = { util::gen_random(0, 256) as u8 };
+                    let copy_len = util::gen_random(0, seed.len() - 1);
+                    let copy_to = util::gen_random(0, seed.len() - copy_len);
+                    for e in &mut seed[copy_to..copy_to + copy_len] { *e = c; }
+                }
+                11 => {
+                    // random
+                    let c = { util::gen_random(0, 256) as u8 };
+                    let p = util::gen_random(0, seed.len());
+                    seed[p] = c;
+                }
+                12 => {
+                    // clone byte(swap 1 byte)
+                    let p1 = util::gen_random(0, seed.len());
+                    let p2 = util::gen_random(0, seed.len());
+                    let tmp = seed[p1];
+                    seed[p1] = seed[p2];
+                    seed[p2] = tmp;
+                }
+                13 => {
+                    // expand
+                    let clone_to = util::gen_random(0, seed.len());
+                    let clone_len = util::gen_random(0, seed.len() - clone_to) + 1;
+                    let slice = vec![util::gen_random(0, 256) as u8; clone_len];
+                    seed.splice(clone_to..clone_to, slice.iter().cloned());
+                }
+                14 => {
+                    // shrink
+                    let del_len = util::gen_random(0, seed.len() - 1);
+                    let del_from = util::gen_random(0, seed.len() - del_len);
+                    seed.drain(del_from..del_from + del_len);
+                }
+                15 => {
+                    // ascii
+                    Printable::mutate(seed, util::gen_random(0, seed.len()), util::gen_random(0, Printable::v_len())).unwrap();
+                }
+                _ => {
+                    panic!("unreachable HonggFuzzMutator code");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Mutator for HonggFuzzMutator {
+    fn mutate(&mut self, seed: &mut Vec<u8>) -> FuzzerResult<()> {
+        Self::mutate(seed, &self.dict, self.iterations, self.printable)
+    }
+}

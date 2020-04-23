@@ -1,0 +1,45 @@
+[package]
+name = "magne-flame"
+version = "0.1.0"
+authors = ["Daiki Sueyoshi"]
+license = "Apache-2.0"
+homepage = "https://github.com/FFRI/magne-flame"
+repository = "https://github.com/FFRI/magne-flame"
+keywords = ["magne-flame", "MagneFlame", "fuzzing", "fuzz testing","framework"]
+description = "Multi-thread (Multi-process) Extensible fuzzing framework"
+readme = "README.md"
+edition = "2018"
+
+exclude = [
+    ".gitignore",
+    "/book/**",
+    "/examples/**",
+]
+
+[workspace]
+members = ["examples/afl"]
+
+[dependencies]
+libc = "0.2.64"
+rand = "0.7"
+actix = "0.9.0"
+num-traits = "0.2"
+nix = "0.17.0"
+log = "0.4"
+once_cell = "1.3.1"
+
+[dependencies.winapi]
+version = "0.3"
+features = ["winuser",
+"winbase",
+"ioapiset",
+"processthreadsapi",
+"processenv",
+"errhandlingapi",
+"synchapi",
+"handleapi",
+"namedpipeapi",
+"fileapi",
+"memoryapi",
+"winerror",
+"jobapi2"]

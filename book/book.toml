@@ -1,0 +1,5 @@
+[book]
+authors = ["Daiki Sueyoshi"]
+language = "en"
+src = "src"
+title = "MagneFlame"
