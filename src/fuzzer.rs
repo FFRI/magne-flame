@@ -2,7 +2,7 @@ use crate::prelude::*;
 use std::io::{stdout, BufWriter, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use winapi::_core::fmt::Formatter;
+use std::fmt::Formatter;
 
 /// Holds the state and statistics of the whole fuzzer.
 pub trait FuzzerContext: 'static + Unpin + Send + Sync + Clone {
@@ -176,3 +176,4 @@ impl From<OsError> for FuzzerError {
         Self(err.to_string())
     }
 }
+

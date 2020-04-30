@@ -1,5 +1,5 @@
-#[doc(hidden)]
 //! Linux version is under construction now. Sorry!
+#[doc(hidden)]
 use crate::prelude::*;
 use nix::errno::errno;
 use nix::fcntl::OFlag;

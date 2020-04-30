@@ -1,6 +1,6 @@
 [package]
 name = "magne-flame"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Daiki Sueyoshi"]
 license = "Apache-2.0"
 homepage = "https://github.com/FFRI/magne-flame"
@@ -15,6 +15,9 @@ exclude = [
     "/book/**",
     "/examples/**",
 ]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-gnu"
 
 [workspace]
 members = ["examples/afl"]
