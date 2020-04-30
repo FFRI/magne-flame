@@ -5,7 +5,7 @@ authors = ["Daiki Sueyoshi"]
 license = "Apache-2.0"
 homepage = "https://github.com/FFRI/magne-flame"
 repository = "https://github.com/FFRI/magne-flame"
-keywords = ["magne-flame", "MagneFlame", "fuzzing", "fuzz testing","framework"]
+keywords = ["magne-flame", "MagneFlame", "fuzzing", "fuzz-testing","framework"]
 description = "Multi-thread (Multi-process) Extensible fuzzing framework"
 readme = "README.md"
 edition = "2018"
@@ -43,3 +43,4 @@ features = ["winuser",
 "memoryapi",
 "winerror",
 "jobapi2"]
+
